@@ -1,0 +1,286 @@
+# -*- coding: utf-8 -*-
+import base64
+import xlrd
+import io
+from flask import Flask, send_file
+from dash import Dash, dcc, html , dash_table
+from dash.dependencies import Input, Output, State
+import os
+import pandas as pd
+
+# Verificare se barcode è installato
+try:
+    import barcode
+except ImportError:
+    # Installare barcode usando pip
+    subprocess.call([os.environ["COMSPEC"], "/C", "pip install barcode"])
+#importo librerie necessarie per Barcode e lettura xlsx
+import barcode
+import barcode.writer
+from barcode.writer import ImageWriter
+barcode_format = barcode.Code128
+# Verificare se openpyxl è installato
+try:
+    import openpyxl
+except ImportError:
+    # Installare openpyxl usando pip
+    subprocess.call([os.environ["COMSPEC"], "/C", "pip install openpyxl"])
+#importo librerie necessarie per lettura XLSX
+import openpyxl
+from openpyxl import *
+from openpyxl.drawing.image import Image
+from openpyxl.utils import get_column_letter
+#
+import re
+import pandas
+#
+import glob
+import os
+from natsort import natsorted
+from openpyxl.styles import Alignment
+#
+import subprocess
+
+#controllo la versione di openpyxl e barcode
+print(openpyxl.__version__)
+print(barcode.version)
+
+#Importo lo stylesheets
+external_stylesheets = ["https://codepen.io/chriddyp/pen/bWLwgP.css"]
+app = Dash(__name__, external_stylesheets=external_stylesheets)
+app.layout = html.Div(
+    [
+#Definisco Titolo dash
+        html.H1(children='PackingList', style={'text-align': 'center'}),
+        html.H3("La dashboard per le tue packing list. Inserisci i dati richiesti ed esporta la tua lista" , style={'text-align': 'center'}),
+#Definisco sotto titolo
+        html.Div(children='''
+        Valorizza i campi che ti verrano richiesti o importa il file!
+        ''' , style={'text-align': 'center'}),
+        
+#Definisco barra dell upload con style
+        dcc.Upload(
+        id='datatable-upload',
+        children=html.Div([
+            'Carica o trascina ',
+            html.A('Seleziona il file')
+        ]),
+        style={
+            'width': '100%', 'height': '60px', 'lineHeight': '60px',
+            'borderWidth': '1px', 'borderStyle': 'dashed',
+            'borderRadius': '5px', 
+            'textAlign': 'center', 
+            'margin': '10px'
+        },
+        ),
+#Definisco tabella output import
+ dash_table.DataTable(id='datatable-upload-container',
+    columns=[
+        {"name": ["MPN"], "id": "mpn", "clearable": "first" , "renamable": True , "deletable": True },
+        {"name": ["Descrizione"], "id": "dsc",  "clearable": "first" , "renamable": True , "deletable": True },
+        {"name": ["Quantità"], "id": "qty", "clearable": "first" , "renamable": True , "deletable": True },
+
+    ],
+    data=[
+        {
+            "mpn": '',
+            "dcs": '',
+            "qty": '',
+        }
+    ],
+    export_format='xlsx',
+    export_headers='display',
+    editable=True,
+    merge_duplicate_headers=None,
+    row_deletable=True,
+    css=[
+        {"selector": ".column-header--delete svg", "rule": 'display: "none"'},
+        {"selector": ".column-header--delete::before", "rule": 'content: "X"'}
+        ]
+ ),       
+#Definisco la tabella che conterrà i dati file importato 
+    dash_table.DataTable(
+        id='adding-rows-table',
+        columns=[
+        {"name": ["MPN"], "id": "mpn", "clearable": "first" , "renamable": True , "deletable": True },
+        {"name": ["Descrizione"], "id": "dsc",  "clearable": "first" , "renamable": True , "deletable": True },
+        {"name": ["Quantità"], "id": "qty", "clearable": "first" , "renamable": True , "deletable": True },
+                ],
+        data=[
+        {
+            "mpn": '',
+            "dcs": '',
+            "qty": '',
+        }
+            ],
+        export_format='xlsx',
+        export_headers='display',
+        editable=True,
+        row_deletable=True,
+        style_cell_conditional=[{"width": "200px",'height': '260px'}],
+        merge_duplicate_headers=None,
+        css=[
+        {"selector": ".column-header--delete svg", "rule": 'display: "none"'},
+        {"selector": ".column-header--delete::before", "rule": 'content: "X"'}]
+    ),
+   
+       
+        #Definisco output dei dati file importato
+        html.Div(id="output"),
+        html.Div(id='output-data-upload', style={'marginRight':'10px'}),
+        html.Br(),
+        #definisco funzione per aggiungere una riga e una colonna all' output dei dati del file importato
+        dcc.Input(
+            id='adding-rows-name',
+            placeholder='Inserisci il nome di una nuova colonna',
+            value=''),
+        html.Button('Aggiungi una colonna', id='editing-rows-button', n_clicks=0, style={'height': 50}),
+        html.Button("Aggiungi una riga alla lista", id='adding-rows-button', n_clicks=0 , style={'height': 50})
+        
+    ])
+
+
+@app.callback(
+    Output('adding-rows-table', 'data'),
+    Input('adding-rows-button', 'n_clicks'),
+    State('adding-rows-table', 'data'),
+    State('adding-rows-table', 'columns'))
+def add_row(n_clicks, rows, columns):
+    if n_clicks > 0:
+        rows.append({c['id']: '' for c in columns})
+    return rows
+
+@app.callback(
+    Output('adding-rows-table', 'columns'),
+    Input('editing-rows-button', 'n_clicks'),
+    State('adding-rows-name', 'value'),
+    State('adding-rows-table', 'columns'))
+def update_columns(n_clicks, value, existing_columns):
+    if n_clicks > 0:
+        existing_columns.append({
+            'id': value, 'name': value,
+            'renamable': True, 'deletable': True
+        })
+    return existing_columns
+
+
+def parse_contents(contents, filename):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    if 'csv' in filename:
+        # Assume that the user uploaded a CSV file
+        return pd.read_csv(
+            io.StringIO(decoded.decode('utf-8')))
+    elif 'xls' in filename:
+        # Assume that the user uploaded an excel file
+        return pd.read_excel(io.BytesIO(decoded))
+
+
+@app.callback(Output('datatable-upload-container', 'data'),
+              Output('datatable-upload-container', 'columns'),
+              Input('datatable-upload', 'contents'),
+              State('datatable-upload', 'filename'))
+              
+def update_output(contents, filename):
+    
+    if contents is None:
+        return [{}], []
+    df = parse_contents(contents, filename)
+    return df.to_dict('records'), [{"name": i, "id": i} for i in df.columns]
+
+
+
+def display_table(rows):
+    df = pd.DataFrame(rows)
+
+    if (df.empty or len(df.columns) < 1):
+        return {
+            'data': [{
+                'x': [],
+                'y': [],
+                'type': 'bar'
+            }]
+        },
+
+
+# Definisco la funzione resize image per i barcode brevi
+def resize_img(image_name):
+    from PIL import Image
+    # Eseguo il print dell'immagine 
+    print(image_name)
+    #
+    basewidth = 178
+    img = Image.open(image_name)
+    wpercent = (basewidth / float(img.size[0]))
+    hsize = int((float(img.size[1]) * float(wpercent)))
+    img = img.resize((basewidth, hsize), Image.Resampling.LANCZOS)
+    img.save(image_name)
+
+# Definisco la funzione resize image per i barcode lunghi
+def resize_img2(image_name):
+    from PIL import Image
+    # Eseguo il print dell'immagine 
+    print(image_name)
+    #
+    basewidth = 800
+    img = Image.open(image_name)
+    wpercent = (basewidth / float(img.size[0]))
+    hsize = int((float(img.size[1]) * float(wpercent)))
+    img = img.resize((basewidth, hsize), Image.Resampling.LANCZOS)
+    img.save(image_name)
+
+
+
+#Carico il file XLS
+source_file = load_workbook('test.xlsx')
+wb = load_workbook('test.xlsx')
+excel_data_df = pandas.read_excel('test.xlsx',header=None)
+print(excel_data_df)                       
+colonna_0 = excel_data_df.iloc[:,0]
+colonna_1 = excel_data_df.iloc[:,1]
+colonna_2 = excel_data_df.iloc[:,2]
+
+num_righe=len(colonna_0)
+num_righe=len(colonna_1)
+num_righe=len(colonna_2)
+
+#Definisco dimensioni barcode
+options = {
+    'module_height': 25.0,
+    'module_width': 0.3
+}
+
+i=0
+#Genero barcode per la prima colonna PART
+for colonna in colonna_0:
+    valore_1=colonna
+    barcode_format = barcode.get_barcode_class('code128')
+    valore_1 = str(valore_1)
+    my_barcode = barcode_format(valore_1, writer=ImageWriter())
+    my_barcode.save("image/part"+str(i), options)
+    i=i+1
+#
+i=0
+#Genero barcode per la terza colonna Quantità
+for colonna in colonna_2:
+    valore_1=colonna
+    # Stampa i valori recuperati
+    barcode_format = barcode.get_barcode_class('code128')
+    valore_1 = str(valore_1)
+    valore_1=re.sub('[^A-Za-z0-9]+', '', valore_1)
+    my_barcode = barcode_format(valore_1, writer=ImageWriter())
+    my_barcode.save("image/qty"+str(i), options)
+    i=i+1
+#
+i=0
+source_file.close
+
+
+if __name__ == "__main__":
+    app.run_server(debug=True)
+
+
+'''
+devo importare in lettura il file in upload dopo la lettura e la stampa su tabella,
+dopo devo fare api per mandare in lettura diretto csv generato da li
+'''
